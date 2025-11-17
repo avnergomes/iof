@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8" />
-    <title>Subbasins – Interactive GeoJSON</title>
+    <title>Interactive Subbasin Map</title>
 
     <!-- Leaflet CSS -->
     <link
@@ -38,12 +38,11 @@
         }
         .controls select {
             margin-top: 4px;
-            width: 200px;
+            width: 220px;
         }
         .info {
             padding: 6px 8px;
             font: 12px/1.2 system-ui, sans-serif;
-            background: white;
             background: rgba(255,255,255,0.9);
             box-shadow: 0 0 15px rgba(0,0,0,0.2);
             border-radius: 4px;
@@ -67,9 +66,11 @@
 
 <div id="map"></div>
 
+<!-- Simple control to choose which column to visualize -->
 <div class="controls">
     <label for="propertySelect">Variable to visualize:</label><br>
     <select id="propertySelect">
+        <!-- You can add/remove options, but the "value" MUST match a property name in your GeoJSON -->
         <option value="Area" selected>Area</option>
         <option value="Slo1">Slo1</option>
         <option value="Len1">Len1</option>
@@ -93,39 +94,40 @@
 ></script>
 
 <script>
-    // 1. Map base setup (you can copy this into your existing map code)
+    // 1. Initialize the map (you can change the initial center/zoom)
     const map = L.map('map', {
-        center: [-15, -55],    // adjust to your area
+        center: [-15, -55],
         zoom: 4
     });
 
+    // Base map
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         maxZoom: 19,
         attribution: '&copy; OpenStreetMap contributors'
     }).addTo(map);
 
-    // 2. Descriptions of each property (shown in legend)
-    // 👉 Adjust the texts as you want; I put generic placeholders.
+    // 2. Descriptions for each property (shown in legend)
     const propertyDescriptions = {
-        PolygonId: 'Internal polygon ID',
-        Subbasin: 'Subbasin ID',
-        Area: 'Area of the polygon (units from model, e.g. ha)',
-        Slo1: 'Average slope (Slo1)',
-        Len1: 'Characteristic length (Len1)',
-        Sll: 'Slope-length factor (Sll)',
-        Lat: 'Latitude of polygon centroid',
-        Lon: 'Longitude of polygon centroid',
-        Elev: 'Mean elevation (m)',
-        ElevMin: 'Minimum elevation (m)',
-        ElevMax: 'Maximum elevation (m)',
-        WaterId: 'Associated waterbody / stream ID'
+        PolygonId: 'Internal polygon ID.',
+        Subbasin: 'Subbasin ID.',
+        Area: 'Area of the polygon (units from model, e.g. ha).',
+        Slo1: 'Average slope (Slo1).',
+        Len1: 'Characteristic length (Len1).',
+        Sll: 'Slope-length factor (Sll).',
+        Lat: 'Latitude of polygon centroid.',
+        Lon: 'Longitude of polygon centroid.',
+        Elev: 'Mean elevation (m).',
+        ElevMin: 'Minimum elevation (m).',
+        ElevMax: 'Maximum elevation (m).',
+        WaterId: 'Associated waterbody / stream ID.'
     };
 
     let currentProperty = 'Area';
     let geojsonLayer = null;
+    let geojsonData = null;
     let breaks = [];
 
-    // 3. Color ramp and breaks
+    // 3. Color ramp and style functions
     function getColor(d) {
         if (d == null || isNaN(d)) return '#cccccc';
         return d > breaks[4] ? '#800026' :
@@ -146,8 +148,8 @@
         if (!values.length) return [0, 1, 2, 3, 4];
 
         const n = values.length;
-        // 5-class quantiles
-        const quantile = q => {
+
+        function quantile(q) {
             const pos = (n - 1) * q;
             const base = Math.floor(pos);
             const rest = pos - base;
@@ -156,8 +158,9 @@
             } else {
                 return values[base];
             }
-        };
+        }
 
+        // 5 class quantiles
         return [
             quantile(0.20),
             quantile(0.40),
@@ -178,7 +181,7 @@
         };
     }
 
-    // 4. Info & legend controls
+    // 4. Info control (top-right)
     const info = L.control({position: 'topright'});
     info.onAdd = function () {
         this._div = L.DomUtil.create('div', 'info');
@@ -188,14 +191,15 @@
     info.update = function (props) {
         this._div.innerHTML = '<h4>Subbasin data</h4>' +
             (props
-                ? '<b>PolygonId:</b> ' + props.PolygonId + '<br/>' +
-                  '<b>Subbasin:</b> ' + props.Subbasin + '<br/>' +
+                ? '<b>PolygonId:</b> ' + (props.PolygonId ?? 'n/a') + '<br/>' +
+                  '<b>Subbasin:</b> ' + (props.Subbasin ?? 'n/a') + '<br/>' +
                   '<b>' + currentProperty + ':</b> ' +
                   (props[currentProperty] ?? 'n/a')
                 : 'Hover over a polygon');
     };
     info.addTo(map);
 
+    // 5. Legend control (bottom-right)
     const legend = L.control({position: 'bottomright'});
     legend.onAdd = function () {
         this._div = L.DomUtil.create('div', 'info legend');
@@ -213,8 +217,9 @@
         for (let i = 0; i < breaks.length; i++) {
             const from = i === 0 ? breaks[0] : breaks[i - 1];
             const to = breaks[i];
+            const mid = (from + to) / 2;
             labels.push(
-                '<i style="background:' + getColor((from + to) / 2) + '"></i> ' +
+                '<i style="background:' + getColor(mid) + '"></i> ' +
                 from.toFixed(2) + ' – ' + to.toFixed(2)
             );
         }
@@ -224,15 +229,20 @@
             labels.join('<br>');
     }
 
-    // 5. Load GeoJSON and set up layer
-    let geojsonData = null;
+    // 6. Load the GeoJSON
+    //    >>> THIS IS THE ONLY LINE YOU NEED TO CHANGE IF YOUR GEOJSON IS IN ANOTHER PLACE <<<
+    //    If your file is in the same folder as this HTML, just keep:
+    const geojsonPath = 'whisp_enriched.geojson';
+    //    Examples of other paths:
+    //    const geojsonPath = 'data/whisp_enriched.geojson';       // if in /data/
+    //    const geojsonPath = './my_subfolder/subbasins.geojson';  // custom path/name
 
-    fetch('whisp_enriched.geojson')
+    fetch(geojsonPath)
         .then(r => r.json())
         .then(data => {
             geojsonData = data;
 
-            // Compute initial breaks for default property
+            // Initial breaks for default property
             breaks = computeBreaks(geojsonData, currentProperty);
 
             geojsonLayer = L.geoJSON(geojsonData, {
@@ -255,11 +265,11 @@
                             geojsonLayer.resetStyle(e.target);
                             info.update();
                         },
-                        click: function (e) {
+                        click: function () {
                             const p = feature.properties;
                             layer.bindPopup(
-                                '<b>PolygonId:</b> ' + p.PolygonId + '<br/>' +
-                                '<b>Subbasin:</b> ' + p.Subbasin + '<br/>' +
+                                '<b>PolygonId:</b> ' + (p.PolygonId ?? 'n/a') + '<br/>' +
+                                '<b>Subbasin:</b> ' + (p.Subbasin ?? 'n/a') + '<br/>' +
                                 '<b>' + currentProperty + ':</b> ' +
                                 (p[currentProperty] ?? 'n/a')
                             ).openPopup();
@@ -268,12 +278,15 @@
                 }
             }).addTo(map);
 
+            // Zoom map to the GeoJSON
             map.fitBounds(geojsonLayer.getBounds());
+
+            // Draw legend
             updateLegend();
         })
         .catch(err => console.error('Error loading GeoJSON:', err));
 
-    // 6. React to column selection changes
+    // 7. Handle column selection changes
     const propertySelect = document.getElementById('propertySelect');
     propertySelect.addEventListener('change', function () {
         currentProperty = this.value;
@@ -283,7 +296,7 @@
         geojsonLayer.setStyle(styleFeature);
         updateLegend();
     });
-
 </script>
+
 </body>
 </html>
