@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>Subbasins – Interactive GeoJSON</title>
+
+    <!-- Leaflet CSS -->
+    <link
+        rel="stylesheet"
+        href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+        crossorigin=""
+    />
+
+    <style>
+        html, body {
+            height: 100%;
+            margin: 0;
+        }
+        #map {
+            height: 100%;
+            width: 100%;
+        }
+        .controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 1000;
+            background: white;
+            padding: 8px 10px;
+            border-radius: 4px;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+            font-family: system-ui, sans-serif;
+            font-size: 13px;
+        }
+        .controls label {
+            font-weight: 600;
+        }
+        .controls select {
+            margin-top: 4px;
+            width: 200px;
+        }
+        .info {
+            padding: 6px 8px;
+            font: 12px/1.2 system-ui, sans-serif;
+            background: white;
+            background: rgba(255,255,255,0.9);
+            box-shadow: 0 0 15px rgba(0,0,0,0.2);
+            border-radius: 4px;
+        }
+        .info h4 {
+            margin: 0 0 4px;
+        }
+        .legend {
+            line-height: 18px;
+        }
+        .legend i {
+            width: 18px;
+            height: 18px;
+            float: left;
+            margin-right: 6px;
+            opacity: 0.7;
+        }
+    </style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div class="controls">
+    <label for="propertySelect">Variable to visualize:</label><br>
+    <select id="propertySelect">
+        <option value="Area" selected>Area</option>
+        <option value="Slo1">Slo1</option>
+        <option value="Len1">Len1</option>
+        <option value="Sll">Sll</option>
+        <option value="Elev">Elev</option>
+        <option value="ElevMin">ElevMin</option>
+        <option value="ElevMax">ElevMax</option>
+        <option value="Lat">Lat</option>
+        <option value="Lon">Lon</option>
+        <option value="Subbasin">Subbasin</option>
+        <option value="PolygonId">PolygonId</option>
+        <option value="WaterId">WaterId</option>
+    </select>
+</div>
+
+<!-- Leaflet JS -->
+<script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+></script>
+
+<script>
+    // 1. Map base setup (you can copy this into your existing map code)
+    const map = L.map('map', {
+        center: [-15, -55],    // adjust to your area
+        zoom: 4
+    });
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    // 2. Descriptions of each property (shown in legend)
+    // 👉 Adjust the texts as you want; I put generic placeholders.
+    const propertyDescriptions = {
+        PolygonId: 'Internal polygon ID',
+        Subbasin: 'Subbasin ID',
+        Area: 'Area of the polygon (units from model, e.g. ha)',
+        Slo1: 'Average slope (Slo1)',
+        Len1: 'Characteristic length (Len1)',
+        Sll: 'Slope-length factor (Sll)',
+        Lat: 'Latitude of polygon centroid',
+        Lon: 'Longitude of polygon centroid',
+        Elev: 'Mean elevation (m)',
+        ElevMin: 'Minimum elevation (m)',
+        ElevMax: 'Maximum elevation (m)',
+        WaterId: 'Associated waterbody / stream ID'
+    };
+
+    let currentProperty = 'Area';
+    let geojsonLayer = null;
+    let breaks = [];
+
+    // 3. Color ramp and breaks
+    function getColor(d) {
+        if (d == null || isNaN(d)) return '#cccccc';
+        return d > breaks[4] ? '#800026' :
+               d > breaks[3] ? '#BD0026' :
+               d > breaks[2] ? '#E31A1C' :
+               d > breaks[1] ? '#FC4E2A' :
+               d > breaks[0] ? '#FD8D3C' :
+                               '#FEB24C';
+    }
+
+    function computeBreaks(featureCollection, property) {
+        const values = featureCollection.features
+            .map(f => f.properties[property])
+            .filter(v => v !== null && v !== undefined && !isNaN(v))
+            .map(Number)
+            .sort((a, b) => a - b);
+
+        if (!values.length) return [0, 1, 2, 3, 4];
+
+        const n = values.length;
+        // 5-class quantiles
+        const quantile = q => {
+            const pos = (n - 1) * q;
+            const base = Math.floor(pos);
+            const rest = pos - base;
+            if (values[base + 1] !== undefined) {
+                return values[base] + rest * (values[base + 1] - values[base]);
+            } else {
+                return values[base];
+            }
+        };
+
+        return [
+            quantile(0.20),
+            quantile(0.40),
+            quantile(0.60),
+            quantile(0.80),
+            quantile(1.00)
+        ];
+    }
+
+    function styleFeature(feature) {
+        const value = Number(feature.properties[currentProperty]);
+        return {
+            fillColor: getColor(value),
+            weight: 1,
+            opacity: 1,
+            color: '#555',
+            fillOpacity: 0.7
+        };
+    }
+
+    // 4. Info & legend controls
+    const info = L.control({position: 'topright'});
+    info.onAdd = function () {
+        this._div = L.DomUtil.create('div', 'info');
+        this.update();
+        return this._div;
+    };
+    info.update = function (props) {
+        this._div.innerHTML = '<h4>Subbasin data</h4>' +
+            (props
+                ? '<b>PolygonId:</b> ' + props.PolygonId + '<br/>' +
+                  '<b>Subbasin:</b> ' + props.Subbasin + '<br/>' +
+                  '<b>' + currentProperty + ':</b> ' +
+                  (props[currentProperty] ?? 'n/a')
+                : 'Hover over a polygon');
+    };
+    info.addTo(map);
+
+    const legend = L.control({position: 'bottomright'});
+    legend.onAdd = function () {
+        this._div = L.DomUtil.create('div', 'info legend');
+        return this._div;
+    };
+    legend.addTo(map);
+
+    function updateLegend() {
+        if (!breaks || !breaks.length) {
+            legend._div.innerHTML = 'No data';
+            return;
+        }
+        const desc = propertyDescriptions[currentProperty] || '';
+        let labels = [];
+        for (let i = 0; i < breaks.length; i++) {
+            const from = i === 0 ? breaks[0] : breaks[i - 1];
+            const to = breaks[i];
+            labels.push(
+                '<i style="background:' + getColor((from + to) / 2) + '"></i> ' +
+                from.toFixed(2) + ' – ' + to.toFixed(2)
+            );
+        }
+        legend._div.innerHTML =
+            '<b>' + currentProperty + '</b><br/>' +
+            (desc ? '<small>' + desc + '</small><br/><br/>' : '') +
+            labels.join('<br>');
+    }
+
+    // 5. Load GeoJSON and set up layer
+    let geojsonData = null;
+
+    fetch('whisp_enriched.geojson')
+        .then(r => r.json())
+        .then(data => {
+            geojsonData = data;
+
+            // Compute initial breaks for default property
+            breaks = computeBreaks(geojsonData, currentProperty);
+
+            geojsonLayer = L.geoJSON(geojsonData, {
+                style: styleFeature,
+                onEachFeature: function (feature, layer) {
+                    layer.on({
+                        mouseover: function (e) {
+                            const target = e.target;
+                            target.setStyle({
+                                weight: 2,
+                                color: '#000',
+                                fillOpacity: 0.9
+                            });
+                            if (!L.Browser.ie && !L.Browser.opera && !L.Browser.edge) {
+                                target.bringToFront();
+                            }
+                            info.update(feature.properties);
+                        },
+                        mouseout: function (e) {
+                            geojsonLayer.resetStyle(e.target);
+                            info.update();
+                        },
+                        click: function (e) {
+                            const p = feature.properties;
+                            layer.bindPopup(
+                                '<b>PolygonId:</b> ' + p.PolygonId + '<br/>' +
+                                '<b>Subbasin:</b> ' + p.Subbasin + '<br/>' +
+                                '<b>' + currentProperty + ':</b> ' +
+                                (p[currentProperty] ?? 'n/a')
+                            ).openPopup();
+                        }
+                    });
+                }
+            }).addTo(map);
+
+            map.fitBounds(geojsonLayer.getBounds());
+            updateLegend();
+        })
+        .catch(err => console.error('Error loading GeoJSON:', err));
+
+    // 6. React to column selection changes
+    const propertySelect = document.getElementById('propertySelect');
+    propertySelect.addEventListener('change', function () {
+        currentProperty = this.value;
+        if (!geojsonData || !geojsonLayer) return;
+
+        breaks = computeBreaks(geojsonData, currentProperty);
+        geojsonLayer.setStyle(styleFeature);
+        updateLegend();
+    });
+
+</script>
+</body>
+</html>
