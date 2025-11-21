@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8" />
-    <title>Interactive Subbasin Map</title>
+    <title>Geo Feature Explorer</title>
 
     <!-- Leaflet CSS -->
     <link
@@ -32,6 +32,8 @@
             box-shadow: 0 1px 4px rgba(0,0,0,0.3);
             font-family: system-ui, sans-serif;
             font-size: 13px;
+            max-height: 50vh;
+            overflow: auto;
         }
         .controls label {
             font-weight: 600;
@@ -39,6 +41,11 @@
         .controls select {
             margin-top: 4px;
             width: 220px;
+        }
+        .controls .meta {
+            margin-top: 6px;
+            font-size: 12px;
+            color: #333;
         }
         .info {
             padding: 6px 8px;
@@ -49,6 +56,10 @@
         }
         .info h4 {
             margin: 0 0 4px;
+        }
+        .info ul {
+            padding-left: 16px;
+            margin: 4px 0 0;
         }
         .legend {
             line-height: 18px;
@@ -66,24 +77,11 @@
 
 <div id="map"></div>
 
-<!-- Simple control to choose which column to visualize -->
+<!-- Control to choose which property to visualize -->
 <div class="controls">
     <label for="propertySelect">Variable to visualize:</label><br>
-    <select id="propertySelect">
-        <!-- You can add/remove options, but the "value" MUST match a property name in your GeoJSON -->
-        <option value="Area" selected>Area</option>
-        <option value="Slo1">Slo1</option>
-        <option value="Len1">Len1</option>
-        <option value="Sll">Sll</option>
-        <option value="Elev">Elev</option>
-        <option value="ElevMin">ElevMin</option>
-        <option value="ElevMax">ElevMax</option>
-        <option value="Lat">Lat</option>
-        <option value="Lon">Lon</option>
-        <option value="Subbasin">Subbasin</option>
-        <option value="PolygonId">PolygonId</option>
-        <option value="WaterId">WaterId</option>
-    </select>
+    <select id="propertySelect"></select>
+    <div class="meta" id="featureMeta"></div>
 </div>
 
 <!-- Leaflet JS -->
@@ -94,10 +92,10 @@
 ></script>
 
 <script>
-    // 1. Initialize the map (you can change the initial center/zoom)
+    // 1. Initialize the map
     const map = L.map('map', {
-        center: [-15, -55],
-        zoom: 4
+        center: [0, 0],
+        zoom: 2
     });
 
     // Base map
@@ -106,26 +104,41 @@
         attribution: '&copy; OpenStreetMap contributors'
     }).addTo(map);
 
-    // 2. Descriptions for each property (shown in legend)
-    const propertyDescriptions = {
-        PolygonId: 'Internal polygon ID.',
-        Subbasin: 'Subbasin ID.',
-        Area: 'Area of the polygon (units from model, e.g. ha).',
-        Slo1: 'Average slope (Slo1).',
-        Len1: 'Characteristic length (Len1).',
-        Sll: 'Slope-length factor (Sll).',
-        Lat: 'Latitude of polygon centroid.',
-        Lon: 'Longitude of polygon centroid.',
-        Elev: 'Mean elevation (m).',
-        ElevMin: 'Minimum elevation (m).',
-        ElevMax: 'Maximum elevation (m).',
-        WaterId: 'Associated waterbody / stream ID.'
-    };
+    const propertySelect = document.getElementById('propertySelect');
+    const meta = document.getElementById('featureMeta');
 
-    let currentProperty = 'Area';
+    let currentProperty = null;
     let geojsonLayer = null;
     let geojsonData = null;
     let breaks = [];
+
+    const geojsonPaths = [
+        'data/geo_part01.geojson',
+        'data/geo_part02.geojson',
+        'data/geo_part03.geojson'
+    ];
+
+    // Helper to read and combine all parts
+    async function loadGeojsonParts() {
+        const responses = await Promise.all(geojsonPaths.map(path => fetch(path)));
+        const jsons = await Promise.all(responses.map(r => r.json()));
+        return jsons.reduce((acc, curr) => {
+            acc.features = acc.features.concat(curr.features || []);
+            return acc;
+        }, { type: 'FeatureCollection', features: [] });
+    }
+
+    function getNumericProperties(featureCollection) {
+        const numericKeys = new Set();
+        featureCollection.features.forEach(f => {
+            Object.entries(f.properties || {}).forEach(([key, value]) => {
+                if (value !== null && value !== '' && !Array.isArray(value) && !isNaN(Number(value))) {
+                    numericKeys.add(key);
+                }
+            });
+        });
+        return Array.from(numericKeys).sort();
+    }
 
     // 3. Color ramp and style functions
     function getColor(d) {
@@ -189,13 +202,15 @@
         return this._div;
     };
     info.update = function (props) {
-        this._div.innerHTML = '<h4>Subbasin data</h4>' +
-            (props
-                ? '<b>PolygonId:</b> ' + (props.PolygonId ?? 'n/a') + '<br/>' +
-                  '<b>Subbasin:</b> ' + (props.Subbasin ?? 'n/a') + '<br/>' +
-                  '<b>' + currentProperty + ':</b> ' +
-                  (props[currentProperty] ?? 'n/a')
-                : 'Hover over a polygon');
+        const details = props ? `
+            <b>ID:</b> ${props.id ?? 'n/a'}<br/>
+            <b>Country:</b> ${props.Country ?? 'n/a'}<br/>
+            <b>Admin Level 1:</b> ${props.Admin_Level_1 ?? 'n/a'}<br/>
+            <b>Unit:</b> ${props.Unit ?? 'n/a'}<br/>
+            <b>${currentProperty}:</b> ${props[currentProperty] ?? 'n/a'}
+        ` : 'Hover over a polygon';
+
+        this._div.innerHTML = '<h4>Feature data</h4>' + details;
     };
     info.addTo(map);
 
@@ -212,7 +227,7 @@
             legend._div.innerHTML = 'No data';
             return;
         }
-        const desc = propertyDescriptions[currentProperty] || '';
+        const desc = currentProperty ? `Quantile breaks for <strong>${currentProperty}</strong>` : '';
         let labels = [];
         for (let i = 0; i < breaks.length; i++) {
             const from = i === 0 ? breaks[0] : breaks[i - 1];
@@ -224,25 +239,28 @@
             );
         }
         legend._div.innerHTML =
-            '<b>' + currentProperty + '</b><br/>' +
+            '<b>' + (currentProperty ?? 'Choose a variable') + '</b><br/>' +
             (desc ? '<small>' + desc + '</small><br/><br/>' : '') +
             labels.join('<br>');
     }
 
-    // 6. Load the GeoJSON
-    //    >>> THIS IS THE ONLY LINE YOU NEED TO CHANGE IF YOUR GEOJSON IS IN ANOTHER PLACE <<<
-    //    If your file is in the same folder as this HTML, just keep:
-    const geojsonPath = 'Sheds.geojson';
-    //    Examples of other paths:
-    //    const geojsonPath = 'data/whisp_enriched.geojson';       // if in /data/
-    //    const geojsonPath = './my_subfolder/subbasins.geojson';  // custom path/name
-
-    fetch(geojsonPath)
-        .then(r => r.json())
+    // 6. Load the GeoJSON parts and render
+    loadGeojsonParts()
         .then(data => {
             geojsonData = data;
 
-            // Initial breaks for default property
+            const numericProps = getNumericProperties(geojsonData);
+            numericProps.forEach((prop, idx) => {
+                const option = document.createElement('option');
+                option.value = prop;
+                option.textContent = prop;
+                if (idx === 0) {
+                    option.selected = true;
+                    currentProperty = prop;
+                }
+                propertySelect.appendChild(option);
+            });
+
             breaks = computeBreaks(geojsonData, currentProperty);
 
             geojsonLayer = L.geoJSON(geojsonData, {
@@ -268,26 +286,26 @@
                         click: function () {
                             const p = feature.properties;
                             layer.bindPopup(
-                                '<b>PolygonId:</b> ' + (p.PolygonId ?? 'n/a') + '<br/>' +
-                                '<b>Subbasin:</b> ' + (p.Subbasin ?? 'n/a') + '<br/>' +
-                                '<b>' + currentProperty + ':</b> ' +
-                                (p[currentProperty] ?? 'n/a')
+                                '<b>ID:</b> ' + (p.id ?? 'n/a') + '<br/>' +
+                                '<b>Country:</b> ' + (p.Country ?? 'n/a') + '<br/>' +
+                                '<b>Admin Level 1:</b> ' + (p.Admin_Level_1 ?? 'n/a') + '<br/>' +
+                                '<b>' + currentProperty + ':</b> ' + (p[currentProperty] ?? 'n/a')
                             ).openPopup();
                         }
                     });
                 }
             }).addTo(map);
 
-            // Zoom map to the GeoJSON
             map.fitBounds(geojsonLayer.getBounds());
-
-            // Draw legend
             updateLegend();
+            meta.innerHTML = `${geojsonData.features.length.toLocaleString()} features loaded. ${numericProps.length} numeric properties available.`;
         })
-        .catch(err => console.error('Error loading GeoJSON:', err));
+        .catch(err => {
+            console.error('Error loading GeoJSON:', err);
+            meta.textContent = 'Failed to load data.';
+        });
 
     // 7. Handle column selection changes
-    const propertySelect = document.getElementById('propertySelect');
     propertySelect.addEventListener('change', function () {
         currentProperty = this.value;
         if (!geojsonData || !geojsonLayer) return;
